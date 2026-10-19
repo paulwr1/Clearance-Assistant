@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 
-// Liest das DPP-Hotlineformular (.docx) aus und baut daraus
-// 1) die einzelnen Archiv-Felder und 2) den Text für „Anfrage / Antwort“.
+// Liest DPP-Word-Dokumente (.docx) aus – z. B. Hotlineformular oder PIRB-Freigabeformular –
+// und baut daraus 1) die Archiv-Felder und 2) den Text für „Anfrage / Antwort“.
 
 export type TableMode = 'table' | 'text';
 
@@ -13,7 +13,10 @@ export interface DocxData {
   betreff: string;
   bearbeiter: string;
   reviewer: string;
+  engManager: string;
+  engPartner: string;
   stichworte: string;
+  formType: 'hotline' | 'pirb';
   imageCount: number;
   tableCount: number;
   render: (mode: TableMode) => { html: string; text: string };
@@ -179,10 +182,7 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
       })
       .join('');
     const text = nonEmpty.map((r) => r.map((c) => c.text).join(' | ')).join('\n');
-    return {
-      html: `<table style="border-collapse:collapse;margin:4px 0;">${trs}</table>`,
-      text,
-    };
+    return { html: `<table style="border-collapse:collapse;margin:4px 0;">${trs}</table>`, text };
   }
 
   // ---------- Text-Modus (für das Hotline-Archiv: kann keine Tabellen) ----------
@@ -190,7 +190,6 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
   const body = nonEmpty.slice(1);
   const lines: { html: string; text: string }[] = [];
 
-  // Kurze Zellen (z. B. Zahlen) → eine Zeile pro Tabellen-Zeile
   const compact = body.every((r) => r.slice(1).every((c) => c.text.length <= 25));
 
   if (compact) {
@@ -211,11 +210,9 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
     return { html: lines.map((l) => l.html).join(''), text: lines.map((l) => l.text).join('\n') };
   }
 
-  // Lange Texte → jede Tabellen-Zeile als eigener Block, jede Spalte in eigener Zeile
   body.forEach((r, ri) => {
     if (ri > 0) lines.push(BLANK);
     let start = 0;
-    // Kurze erste Spalte (z. B. „Nr. 1“) wird zur fetten Überschrift des Blocks
     if (r[0] && r[0].text.length <= 6 && r.length > 1) {
       const title = `${header[0] ?? ''} ${r[0].text}`.trim();
       lines.push({ html: `<p><strong><u>${esc(title)}</u></strong></p>`, text: title });
@@ -236,27 +233,64 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
 
 // ---------- Felder aus den Formular-Tabellen ----------
 
-const norm = (s: string) => s.replace(/[:*]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+const norm = (s: string) => s.replace(/[:*?]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+// Bekannte Beschriftungen – damit wir nie eine Beschriftung als Wert übernehmen
+const KNOWN_LABELS = [
+  'mandant', 'stichtag', 'ap referenz', 'wb-nummer', 'betreff', 'ticket', 'sap', 'dpp bearbeiter',
+  'dpp reviewer', 'engagement manager', 'engagement partner', 'konzernzugehörigkeit', 'kapitalmarkt',
+  'berichtskritiker', 'zweitunterschrift',
+];
+const isLabel = (s: string | undefined) => {
+  const v = (s ?? '').trim();
+  if (!v) return false;
+  if (/:\s*$/.test(v)) return true;
+  const n = norm(v);
+  return KNOWN_LABELS.some((l) => n === l || n.startsWith(`${l} `) || n.startsWith(`${l}/`) || n.startsWith(`${l}-`));
+};
 const cleanValue = (s: string | undefined) => {
   const v = (s ?? '').trim();
-  return /^\[.*\]$/.test(v) ? '' : v;
+  return /^\[.*\]$/.test(v) || isLabel(v) ? '' : v;
 };
 
-function findValue(tables: Element[], label: string, direction: 'right' | 'below'): string {
-  const l = label.toLowerCase();
-  for (const tbl of tables) {
-    const rows = kids(tbl, 'tr').map((tr) => kids(tr, 'tc').map(textOf));
+type Grid = string[][];
+
+// Sucht eine Beschriftung und nimmt den Wert rechts daneben – oder darunter,
+// wenn rechts nur eine weitere Beschriftung steht (z. B. Kopfzeile „Mandant | Stichtag“).
+function findCell(grids: Grid[], match: (cell: string) => boolean): string {
+  for (const rows of grids) {
     for (let r = 0; r < rows.length; r++) {
       for (let c = 0; c < rows[r].length; c++) {
-        const cell = norm(rows[r][c]);
-        if (cell === l || (cell.startsWith(l) && cell.length < l.length + 20)) {
-          const v = direction === 'right' ? rows[r][c + 1] : rows[r + 1]?.[c];
-          if (cleanValue(v)) return cleanValue(v);
-        }
+        if (!match(norm(rows[r][c]))) continue;
+        const right = cleanValue(rows[r][c + 1]);
+        if (right) return right;
+        const below = cleanValue(rows[r + 1]?.[c]);
+        if (below) return below;
       }
     }
   }
   return '';
+}
+
+const byLabel = (grids: Grid[], label: string) =>
+  findCell(grids, (cell) => cell === label || (cell.startsWith(label) && cell.length < label.length + 20));
+
+// „Ticket-Nummer / SAP-Nummer“ oder „WB-Nummer/Ticket-Nummer“ → richtige Nummer anhand der Reihenfolge
+function findTicket(grids: Grid[]): { ticketNr: string; otherNr: string } {
+  for (const rows of grids) {
+    for (let r = 0; r < rows.length; r++) {
+      for (let c = 0; c < rows[r].length; c++) {
+        const label = norm(rows[r][c]);
+        if (!label.includes('ticket') || label.length > 60) continue;
+        const nums = (rows[r][c + 1] ?? '').match(/\d{4,}/g) ?? [];
+        if (!nums.length) continue;
+        const parts = label.split('/');
+        const idx = Math.max(0, parts.findIndex((p) => p.includes('ticket')));
+        return { ticketNr: nums[idx] ?? nums[0], otherNr: nums.find((_, i) => i !== idx) ?? '' };
+      }
+    }
+  }
+  return { ticketNr: '', otherNr: '' };
 }
 
 // ---------- Hauptfunktion ----------
@@ -271,24 +305,33 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
   if (!body) throw new Error('Word-Datei konnte nicht gelesen werden.');
 
   const topTables = kids(body, 'tbl');
+  const grids: Grid[] = topTables.map((tbl) => kids(tbl, 'tr').map((tr) => kids(tr, 'tc').map(textOf)));
 
-  const ticketRaw = findValue(topTables, 'ticket-nummer', 'right') || findValue(topTables, 'ticket', 'right');
-  const nums = ticketRaw.match(/\d{4,}/g) ?? [];
-  let ticketNr = nums[0] ?? '';
-  const sapNr = nums[1] ?? '';
+  let { ticketNr, otherNr } = findTicket(grids);
   if (!ticketNr) {
     const m = textOf(body).match(/Ticket[- ]?(?:Nummer|Nr\.?)[^0-9]{0,40}(\d{5,})/i);
     ticketNr = m?.[1] ?? '';
   }
 
+  // PIRB-Freigabeformular erkennen (Titel, Kopfzeile oder „Antwort des DPP (PIRB)“)
+  let headerText = '';
+  for (const name of Object.keys(zip.files)) {
+    if (/^word\/header\d*\.xml$/.test(name)) headerText += await zip.files[name].async('string');
+  }
+  const allText = `${textOf(body)} ${headerText.replace(/<[^>]+>/g, ' ')}`;
+  const formType: DocxData['formType'] = /PIRB[\s–-]*Freigabe|\(PIRB\)/i.test(allText) ? 'pirb' : 'hotline';
+
   const fields = {
     ticketNr,
-    sapNr,
-    mandant: findValue(topTables, 'mandant', 'below') || findValue(topTables, 'mandant', 'right'),
-    stichtag: findValue(topTables, 'stichtag', 'below') || findValue(topTables, 'stichtag', 'right'),
-    betreff: findValue(topTables, 'betreff', 'right'),
-    bearbeiter: findValue(topTables, 'dpp bearbeiter', 'right'),
-    reviewer: findValue(topTables, 'dpp reviewer', 'right'),
+    sapNr: otherNr,
+    mandant: byLabel(grids, 'mandant'),
+    stichtag: byLabel(grids, 'stichtag') || byLabel(grids, 'bilanzstichtag'),
+    betreff: byLabel(grids, 'betreff'),
+    bearbeiter: byLabel(grids, 'dpp bearbeiter'),
+    reviewer: byLabel(grids, 'dpp reviewer'),
+    engManager: byLabel(grids, 'engagement manager'),
+    engPartner: byLabel(grids, 'engagement partner'),
+    formType,
   };
 
   let stichworte = '';
@@ -298,7 +341,7 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
   const render = (mode: TableMode) => {
     const blocks: { html: string; text: string }[] = [];
     const placeholder = `[Grafik einsehbar unter Ticket Nr. ${ticketNr || 'XXXXX'}]`;
-    let skipping = false; // true, solange wir im Abschnitt „Stichworte“ sind
+    let skipping = false;
     let listBuf: Para[] = [];
     imageCount = 0;
     tableCount = 0;
@@ -372,8 +415,8 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
       const cols = kids(first(el, 'tblGrid'), 'gridCol').length || Math.max(...rows.map((r) => kids(r, 'tc').length));
       const allCells = rows.flatMap((r) => kids(r, 'tc').map((c) => norm(textOf(c))));
 
-      // Kopf-Tabelle (Mandant / Stichtag / AP Referenz) → nur Felder, nicht in den Text
-      if (allCells.includes('mandant') && allCells.includes('stichtag')) continue;
+      // Kopf-Tabellen mit Stammdaten → nur Felder, nicht in den Text
+      if (allCells.includes('mandant') || allCells.includes('engagement manager')) continue;
 
       if (cols === 1) {
         for (const tr of rows) {
@@ -381,7 +424,7 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
             const paras = kids(tc).filter((k) => k.localName === 'p' || k.localName === 'tbl');
             const nonEmpty = paras.filter((k) => k.localName === 'tbl' || !renderParagraph(k).empty);
             const only = nonEmpty.length === 1 && nonEmpty[0].localName === 'p' ? renderParagraph(nonEmpty[0]) : null;
-            if (only && only.heading && only.text.length < 120) setHeading(only.text);
+            if (only && (only.heading || /^antwort des dpp/i.test(only.text)) && only.text.length < 120) setHeading(only.text);
             else addContent(tc);
           }
         }
@@ -395,12 +438,13 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
       for (const tr of rows) {
         const cells = kids(tr, 'tc').map(cellContent);
         if (cells.filter((c) => c.text).length < 2) continue;
-        // Ticket-Nr., DPP Bearbeiter und DPP Reviewer gehören nicht in „Anfrage / Antwort“
-        if (/^(Ticket|DPP Bearbeiter|DPP Reviewer)/i.test(cells[0].text.trim())) continue;
+        // Ticket-Nr., DPP Bearbeiter/Reviewer und Unterlagen-Liste gehören nicht in „Anfrage / Antwort“
+        if (/^(WB-Nummer|Ticket|DPP Bearbeiter|DPP Reviewer|Einzureichende)/i.test(cells[0].text.trim())) continue;
         const [label, ...rest] = cells;
+        const lbl = label.html.replace(/:\s*(<\/strong>)?\s*$/, '$1');
         blocks.push({
-          html: `<p><strong>${label.html}:</strong> ${rest.map((c) => c.html).join(' ')}</p>`,
-          text: `${label.text}: ${rest.map((c) => c.text).join(' ')}`,
+          html: `<p><strong>${lbl}:</strong> ${rest.map((c) => c.html).join(' ')}</p>`,
+          text: `${label.text.replace(/:\s*$/, '')}: ${rest.map((c) => c.text).join(' ')}`,
         });
       }
     }
@@ -412,7 +456,7 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
     };
   };
 
-  render('table'); // füllt stichworte / imageCount / tableCount
+  render('table');
 
   return { ...fields, stichworte: stichworte.trim(), imageCount, tableCount, render };
 }

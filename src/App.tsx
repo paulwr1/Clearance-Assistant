@@ -25,6 +25,7 @@ type FieldKey =
 
 const today = () => new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const MODE_KEY = 'clearance-assistant:tableMode';
+const BLOCK_MSG = '⛔ PIRB, PIR, Fehlerkorrektur/Bilanzberichtigung werden nicht ins Archiv übertragen!';
 
 export default function App() {
   const [doc, setDoc] = useState<DocxData | null>(null);
@@ -65,14 +66,11 @@ export default function App() {
       ocrImage(file, (p) => setShots((s) => s.map((x) => (x.id === id ? { ...x, progress: p } : x))))
         .then((text) => setShots((s) => s.map((x) => (x.id === id ? { ...x, text, progress: 1 } : x))))
         .catch(() =>
-          setShots((s) =>
-            s.map((x) => (x.id === id ? { ...x, error: 'Texterkennung fehlgeschlagen', progress: 1 } : x)),
-          ),
+          setShots((s) => s.map((x) => (x.id === id ? { ...x, error: 'Texterkennung fehlgeschlagen', progress: 1 } : x))),
         );
     }
   }, []);
 
-  // Strg + V überall auf der Seite → Screenshot einfügen
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'));
@@ -88,18 +86,18 @@ export default function App() {
   const ocrBusy = shots.some((s) => s.progress < 1);
   const ticket = useMemo(() => parseTicketText(shots.map((s) => s.text ?? '').join('\n')), [shots]);
 
-  // ---------- Felder (automatisch + manuelle Änderungen) ----------
+  // ---------- Felder: Word hat Vorrang (zuverlässiger), sonst Screenshot ----------
   const auto: Record<FieldKey, string> = {
     title: doc?.ticketNr ? `Ticket Nr ${doc.ticketNr}` : '',
     stichworte: doc?.stichworte ?? '',
     bilanzstichtag: doc?.stichtag ?? '',
-    norm: ticket.kategorie,
+    norm: ticket.kategorie || (doc?.formType === 'pirb' ? 'PIRB' : ''),
     clearanceDate: ticket.clearanceDate || today(),
     mandant: doc?.mandant ?? '',
     partnerReviewer: doc?.reviewer ?? '',
     managerPreparer: doc?.bearbeiter ?? '',
-    engManager: ticket.engagementManager,
-    engPartner: ticket.engagementPartner,
+    engManager: doc?.engManager || ticket.engagementManager,
+    engPartner: doc?.engPartner || ticket.engagementPartner,
     ticketNr: doc?.ticketNr || ticket.ticketNr,
     inquiryNr: '',
   };
@@ -113,13 +111,19 @@ export default function App() {
 
   const body = useMemo(() => doc?.render(mode) ?? null, [doc, mode]);
 
-  // ---------- Warnungen ----------
+  // ---------- Sperre + Warnungen ----------
+  const normText = `${val('norm')} ${ticket.themengebiet}`.trim();
+  const blocked = EXCLUDED.test(normText) || doc?.formType === 'pirb';
+  useEffect(() => {
+    if (blocked) window.alert(BLOCK_MSG);
+  }, [blocked]);
+
   const warnings: { tone: 'red' | 'amber'; text: string }[] = [];
-  const normText = `${val('norm')} ${ticket.themengebiet}`;
-  const blocked = EXCLUDED.test(normText);
-  useEffect(() => { if (blocked) window.alert("⛔ PIRB, PIR, Fehlerkorrektur/Bilanzberichtigung werden nicht ins Archiv übertragen!"); }, [blocked]);
-  if (EXCLUDED.test(normText))
-    warnings.push({ tone: 'red', text: `⛔ PIRB, PIR, Fehlerkorrektur/Bilanzberichtigung werden nicht ins Archiv übertragen! Erkannt: „${normText.trim()}“ – Mail nur abhaken.` });
+  if (blocked)
+    warnings.push({
+      tone: 'red',
+      text: `${BLOCK_MSG} Erkannt: ${doc?.formType === 'pirb' ? 'PIRB-Freigabeformular' : `„${normText}“`} – Mail nur abhaken.`,
+    });
   if (ticket.status === 'offen')
     warnings.push({ tone: 'amber', text: 'Ticket laut Screenshot nicht abgeschlossen – Clearance-Mail erstmal ignorieren.' });
   if (doc?.ticketNr && ticket.ticketNr && doc.ticketNr !== ticket.ticketNr)
@@ -137,6 +141,7 @@ export default function App() {
 
   const required: FieldKey[] = ['title', 'stichworte', 'bilanzstichtag', 'norm', 'clearanceDate', 'mandant', 'partnerReviewer', 'managerPreparer', 'engManager', 'engPartner', 'ticketNr'];
   const filled = required.filter((k) => val(k).trim()).length;
+  const src = (fromDoc: string, word: string, shot: string) => (fromDoc ? word : shot);
 
   return (
     <div className="relative isolate min-h-screen overflow-hidden">
@@ -169,11 +174,10 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6">
-        {/* 1. Eingaben */}
         <div className="grid gap-4 md:grid-cols-2">
           <DropZone
-            title="1. Word-Dokument (DPP-Hotlineformular)"
-            hint="Hierher ziehen oder klicken – .docx"
+            title="1. Word-Dokument"
+            hint="Hotlineformular oder Freigabeformular – hierher ziehen oder klicken"
             accept=".docx"
             icon={FileText}
             onFiles={handleDoc}
@@ -183,14 +187,16 @@ export default function App() {
             {doc && !docLoading && (
               <p className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-300">
                 <CircleCheck className="size-4 shrink-0" />
-                <span className="truncate">{docName} · {doc.tableCount} Tabelle(n) · {doc.imageCount} Grafik(en)</span>
+                <span className="truncate">
+                  {docName} · {doc.formType === 'pirb' ? 'PIRB-Formular' : 'Hotlineformular'} · {doc.tableCount} Tabelle(n) · {doc.imageCount} Grafik(en)
+                </span>
               </p>
             )}
           </DropZone>
 
           <DropZone
-            title="2. Ticket-Screenshots"
-            hint="Strg + V irgendwo auf der Seite · Reiter „Engagement Team“ + „DPP Anfrage“"
+            title="2. Screenshots"
+            hint="Strg + V · Ticket („Engagement Team“, „DPP Anfrage“) + Clearance-Mail"
             accept="image/*"
             multiple
             icon={ImagePlus}
@@ -222,7 +228,6 @@ export default function App() {
           </DropZone>
         </div>
 
-        {/* Warnungen */}
         {warnings.map((w) => (
           <div
             key={w.text}
@@ -237,7 +242,6 @@ export default function App() {
           </div>
         ))}
 
-        {/* 2. Archiv-Felder (gleiche Reihenfolge wie im Hotline-Archiv) */}
         <section>
           <div className="mb-3 flex items-end justify-between">
             <h2 className="text-lg font-semibold">Archiv-Felder</h2>
@@ -255,19 +259,18 @@ export default function App() {
             <FieldRow label="Mandant" source="Word · Mandant" {...field('mandant')} />
             <FieldRow label="Partner / Reviewer" source="Word · DPP Reviewer" hint="Laut DPP-Organigramm kurz prüfen" {...field('partnerReviewer')} />
             <FieldRow label="Manager / Preparer" source="Word · DPP Bearbeiter" hint="Laut DPP-Organigramm kurz prüfen" {...field('managerPreparer')} />
-            <FieldRow label="Engagement Manager" source="Screenshot · Manager" {...field('engManager')} />
-            <FieldRow label="Engagement Partner" source="Screenshot · Partner" {...field('engPartner')} />
-            <FieldRow label="Ticket Nr" source={doc?.sapNr ? `Word · SAP ${doc.sapNr}` : 'Word'} {...field('ticketNr')} />
+            <FieldRow label="Engagement Manager" source={src(doc?.engManager ?? '', 'Word · Engagement Manager', 'Screenshot · Manager')} {...field('engManager')} />
+            <FieldRow label="Engagement Partner" source={src(doc?.engPartner ?? '', 'Word · Engagement Partner', 'Screenshot · Partner')} {...field('engPartner')} />
+            <FieldRow label="Ticket Nr" source={doc?.sapNr ? `Word · andere Nr. ${doc.sapNr}` : 'Word'} {...field('ticketNr')} />
             <FieldRow label="Inquiry Nr" source="optional" required={false} {...field('inquiryNr')} />
           </div>
         </section>
 
-        {/* 3. Anfrage / Antwort */}
         <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-5 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-white/5">
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-lg font-semibold">Anfrage / Antwort</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Ohne Stichworte · Grafiken → Verweis auf Ticket-Nr.</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Ohne Stichworte · Grafiken → Verweis auf Ticket-Nr. · wird immer als Text eingefügt</p>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex rounded-xl border border-slate-200 p-0.5 text-xs dark:border-white/10">
@@ -290,8 +293,9 @@ export default function App() {
                 disabled={!body || blocked}
                 done={copied.has('body')}
                 onCopy={async () => {
-                  if (!body) return;
-                  const t = doc?.render('text') ?? body; await copyRich(t.html, t.text);
+                  if (!doc) return;
+                  const t = doc.render('text');
+                  await copyRich(t.html, t.text);
                   setCopied((c) => new Set(c).add('body'));
                 }}
               />
