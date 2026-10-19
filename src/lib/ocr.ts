@@ -1,7 +1,6 @@
 import { createWorker } from 'tesseract.js';
 
-// Liest Text aus Ticket-Screenshots (läuft komplett im Browser)
-// und sucht darin Engagement Partner, Engagement Manager, Kategorie und Status.
+// Liest Text aus Screenshots (Ticket + Clearance-Mail) – läuft komplett im Browser.
 
 export interface TicketData {
   ticketNr: string;
@@ -10,9 +9,11 @@ export interface TicketData {
   kategorie: string;
   themengebiet: string;
   status: 'abgeschlossen' | 'offen' | '';
+  clearanceDate: string;
 }
 
-// Screenshot vergrößern + in Graustufen umwandeln → bessere Texterkennung
+// Screenshot vergrößern, in Graustufen umwandeln und bei dunklem Hintergrund
+// (z. B. Outlook im Dark Mode) invertieren → bessere Texterkennung
 async function prepare(file: Blob): Promise<HTMLCanvasElement> {
   const bitmap = await createImageBitmap(file);
   const scale = bitmap.width < 2200 ? 2 : 1;
@@ -21,7 +22,22 @@ async function prepare(file: Blob): Promise<HTMLCanvasElement> {
   canvas.height = bitmap.height * scale;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas nicht verfügbar');
-  ctx.filter = 'grayscale(1) contrast(1.2)';
+
+  // Helligkeit grob messen
+  const probe = document.createElement('canvas');
+  probe.width = 64;
+  probe.height = 64;
+  const pctx = probe.getContext('2d');
+  let dark = false;
+  if (pctx) {
+    pctx.drawImage(bitmap, 0, 0, 64, 64);
+    const d = pctx.getImageData(0, 0, 64, 64).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += (d[i] + d[i + 1] + d[i + 2]) / 3;
+    dark = sum / (d.length / 4) < 110;
+  }
+
+  ctx.filter = `grayscale(1) contrast(1.2)${dark ? ' invert(1)' : ''}`;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   return canvas;
@@ -45,10 +61,21 @@ export async function ocrImage(file: Blob, onProgress?: (p: number) => void): Pr
 // Name im Format „Nachname, Vorname“ (auch „von Hoyningen-Huene, Constantin“)
 const NAME = String.raw`((?:[A-Za-zÄÖÜäöüß'’.\-]+\s+){0,3}?[A-Za-zÄÖÜäöüß'’.\-]+,\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)`;
 
+// Gibt den Namen als „Vorname Nachname“ zurück
 function findName(text: string, label: string): string {
   const re = new RegExp(String.raw`(?<![A-Za-zÄÖÜäöüß/])${label}\s*[:;.]?\s*\*?\s*[|\[(]?\s*${NAME}`);
-  const [last, firstName] = (text.match(re)?.[1] ?? "").split(",").map((s) => s.trim());
+  const [last, firstName] = (text.match(re)?.[1] ?? '').split(',').map((s) => s.trim());
   return firstName ? `${firstName} ${last}` : last;
+}
+
+// Datum der Clearance-Mail, z. B. „Mo 12.10.2026 10:07“
+function findMailDate(text: string): string {
+  const pad = (d: string, m: string, y: string) => `${d.padStart(2, '0')}.${m.padStart(2, '0')}.${y}`;
+  const withDay = text.match(/\b(?:Mo|Di|Mi|Do|Fr|Sa|So)[a-z]*\.?,?\s+(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (withDay) return pad(withDay[1], withDay[2], withDay[3]);
+  const withTime = text.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})\s+\d{1,2}:\d{2}/);
+  if (withTime) return pad(withTime[1], withTime[2], withTime[3]);
+  return '';
 }
 
 export const EXCLUDED = /\bPIRB?\b|Fehlerkorrektur|Bilanzberichtigung|Going[\s-]*Concern/i;
@@ -83,5 +110,6 @@ export function parseTicketText(text: string): TicketData {
     kategorie,
     themengebiet,
     status,
+    clearanceDate: findMailDate(text),
   };
 }

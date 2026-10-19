@@ -94,7 +94,7 @@ export default function App() {
     stichworte: doc?.stichworte ?? '',
     bilanzstichtag: doc?.stichtag ?? '',
     norm: ticket.kategorie,
-    clearanceDate: today(),
+    clearanceDate: ticket.clearanceDate || today(),
     mandant: doc?.mandant ?? '',
     partnerReviewer: doc?.reviewer ?? '',
     managerPreparer: doc?.bearbeiter ?? '',
@@ -251,7 +251,7 @@ export default function App() {
             <FieldRow label="Stichwörter" source="Word · Stichworte" {...field('stichworte')} />
             <FieldRow label="Bilanzstichtag" source="Word · Stichtag" {...field('bilanzstichtag')} />
             <FieldRow label="Rechnungslegungsnorm" source="Screenshot · Relevante Kategorie" hint={ticket.themengebiet ? `Themengebiet: ${ticket.themengebiet}` : undefined} {...field('norm')} />
-            <FieldRow label="Clearance Date" source="heute · ggf. Maildatum" {...field('clearanceDate')} />
+            <FieldRow label="Clearance Date" source={ticket.clearanceDate ? 'Screenshot · Mail-Datum' : 'heute – Mail-Screenshot einfügen oder ändern'} {...field('clearanceDate')} />
             <FieldRow label="Mandant" source="Word · Mandant" {...field('mandant')} />
             <FieldRow label="Partner / Reviewer" source="Word · DPP Reviewer" hint="Laut DPP-Organigramm kurz prüfen" {...field('partnerReviewer')} />
             <FieldRow label="Manager / Preparer" source="Word · DPP Bearbeiter" hint="Laut DPP-Organigramm kurz prüfen" {...field('managerPreparer')} />
