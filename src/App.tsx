@@ -291,7 +291,7 @@ export default function App() {
                 done={copied.has('body')}
                 onCopy={async () => {
                   if (!body) return;
-                  await copyRich(body.html, body.text);
+                  const t = doc?.render('text') ?? body; await copyRich(t.html, t.text);
                   setCopied((c) => new Set(c).add('body'));
                 }}
               />

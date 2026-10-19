@@ -154,6 +154,7 @@ function cellContent(tc: Element): { html: string; text: string } {
 }
 
 const CELL = 'border:1px solid #9ca3af;padding:4px 8px;vertical-align:top;';
+const BLANK = { html: '<p><br></p>', text: '' };
 
 function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: string } {
   const rows = kids(tbl, 'tr').map((tr) =>
@@ -184,38 +185,53 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
     };
   }
 
-  // Text-Modus: jede Zeile als eigene, gut lesbare Zeile
+  // ---------- Text-Modus (für das Hotline-Archiv: kann keine Tabellen) ----------
   const header = nonEmpty[0].map((c) => c.text);
+  const body = nonEmpty.slice(1);
   const lines: { html: string; text: string }[] = [];
-  lines.push({
-    html: `<strong>${header.map(esc).filter(Boolean).join(' · ')}</strong>`,
-    text: header.filter(Boolean).join(' · '),
-  });
-  for (const r of nonEmpty.slice(1)) {
-    const label = r[0]?.text ?? '';
-    const rest = r.slice(1);
-    let restHtml: string;
-    let restText: string;
-    if (rest.length <= 1) {
-      restHtml = rest[0]?.html ?? '';
-      restText = rest[0]?.text ?? '';
-    } else {
-      restHtml = rest
-        .map((c, i) => (header[i + 1] ? `${esc(header[i + 1])}: ` : '') + (c.html || '–'))
-        .join(' · ');
-      restText = rest
-        .map((c, i) => (header[i + 1] ? `${header[i + 1]}: ` : '') + (c.text || '–'))
-        .join(' · ');
-    }
+
+  // Kurze Zellen (z. B. Zahlen) → eine Zeile pro Tabellen-Zeile
+  const compact = body.every((r) => r.slice(1).every((c) => c.text.length <= 25));
+
+  if (compact) {
     lines.push({
-      html: label ? `<strong>${esc(label)}:</strong> ${restHtml}` : restHtml,
-      text: label ? `${label}: ${restText}` : restText,
+      html: `<p><strong>${header.map(esc).filter(Boolean).join(' · ')}</strong></p>`,
+      text: header.filter(Boolean).join(' · '),
     });
+    for (const r of body) {
+      const label = r[0]?.text ?? '';
+      const vals = r.slice(1).map((c, i) => ({ h: header[i + 1] ?? '', c }));
+      const html = vals.map(({ h, c }) => (h ? `${esc(h)}: ` : '') + (c.html || '–')).join(' · ');
+      const text = vals.map(({ h, c }) => (h ? `${h}: ` : '') + (c.text || '–')).join(' · ');
+      lines.push({
+        html: `<p>${label ? `<strong>${esc(label)}:</strong> ` : ''}${html}</p>`,
+        text: label ? `${label}: ${text}` : text,
+      });
+    }
+    return { html: lines.map((l) => l.html).join(''), text: lines.map((l) => l.text).join('\n') };
   }
-  return {
-    html: lines.map((l) => `<p>${l.html}</p>`).join(''),
-    text: lines.map((l) => l.text).join('\n'),
-  };
+
+  // Lange Texte → jede Tabellen-Zeile als eigener Block, jede Spalte in eigener Zeile
+  body.forEach((r, ri) => {
+    if (ri > 0) lines.push(BLANK);
+    let start = 0;
+    // Kurze erste Spalte (z. B. „Nr. 1“) wird zur fetten Überschrift des Blocks
+    if (r[0] && r[0].text.length <= 6 && r.length > 1) {
+      const title = `${header[0] ?? ''} ${r[0].text}`.trim();
+      lines.push({ html: `<p><strong><u>${esc(title)}</u></strong></p>`, text: title });
+      start = 1;
+    }
+    for (let i = start; i < r.length; i++) {
+      const h = header[i] ?? '';
+      const c = r[i];
+      if (!c.text && !h) continue;
+      lines.push({
+        html: `<p>${h ? `<strong>${esc(h)}:</strong> ` : ''}${c.html || '–'}</p>`,
+        text: `${h ? `${h}: ` : ''}${c.text || '–'}`,
+      });
+    }
+  });
+  return { html: lines.map((l) => l.html).join(''), text: lines.map((l) => l.text).join('\n') };
 }
 
 // ---------- Felder aus den Formular-Tabellen ----------
@@ -275,7 +291,6 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
     reviewer: findValue(topTables, 'dpp reviewer', 'right'),
   };
 
-  // Stichworte + Zählung einmal vorab ermitteln
   let stichworte = '';
   let imageCount = 0;
   let tableCount = 0;
@@ -314,7 +329,6 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
       blocks.push({ html: `<p>${p.html}</p>`, text: p.text });
     };
 
-    // Inhalt innerhalb eines Abschnitts (Zelle): Absätze, Listen, echte Tabellen
     const addContent = (container: Element) => {
       for (const k of kids(container)) {
         if (k.localName === 'p') {
@@ -362,7 +376,6 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
       if (allCells.includes('mandant') && allCells.includes('stichtag')) continue;
 
       if (cols === 1) {
-        // Abschnitts-Tabelle: Überschrift-Zeile + Inhalts-Zeilen
         for (const tr of rows) {
           for (const tc of kids(tr, 'tc')) {
             const paras = kids(tc).filter((k) => k.localName === 'p' || k.localName === 'tbl');
@@ -376,12 +389,13 @@ export async function parseDocx(file: Blob): Promise<DocxData> {
         continue;
       }
 
-      // Mehrspaltige Formular-Tabelle (Betreff, Ticket-Nummer, Bearbeiter …) → „Label: Wert“
+      // Mehrspaltige Formular-Tabelle (Betreff …) → „Label: Wert“
       flushList();
       skipping = false;
       for (const tr of rows) {
         const cells = kids(tr, 'tc').map(cellContent);
         if (cells.filter((c) => c.text).length < 2) continue;
+        // Ticket-Nr., DPP Bearbeiter und DPP Reviewer gehören nicht in „Anfrage / Antwort“
         if (/^(Ticket|DPP Bearbeiter|DPP Reviewer)/i.test(cells[0].text.trim())) continue;
         const [label, ...rest] = cells;
         blocks.push({
