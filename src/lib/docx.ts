@@ -186,14 +186,22 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
   }
 
   // ---------- Text-Modus (für das Hotline-Archiv: kann keine Tabellen) ----------
-  // Buchungssätze (Zelle „an“/„per“, keine Kopfzeile) → jede Zeile als eine Zeile Text
+  // Tabellen ohne Kopfzeile: Buchungssätze („an“/„per“) oder Zahlen schon in der 1. Zeile
   const isJoin = (s: string) => /^(an|per)$/i.test(s.trim());
-  const noHeader = nonEmpty[0].some((c) => isJoin(c.text));
+  const isDataCell = (s: string) => /\d[.,]\d|%/.test(s);
+  const noHeader =
+    nonEmpty[0].some((c) => isJoin(c.text)) || nonEmpty[0].slice(1).some((c) => isDataCell(c.text));
   if (noHeader) {
     const out = nonEmpty.map((r) => {
       const cells = r.filter((c) => c.text);
-      const sep = cells.some((c) => isJoin(c.text)) ? ' ' : ' · ';
-      return { html: `<p>${cells.map((c) => c.html).join(sep)}</p>`, text: cells.map((c) => c.text).join(sep) };
+      if (cells.some((c) => isJoin(c.text)))
+        return { html: `<p>${cells.map((c) => c.html).join(' ')}</p>`, text: cells.map((c) => c.text).join(' ') };
+      const [label, ...rest] = cells;
+      if (!rest.length) return { html: `<p>${label?.html ?? ''}</p>`, text: label?.text ?? '' };
+      return {
+        html: `<p><strong>${label.html}:</strong> ${rest.map((c) => c.html).join(' · ')}</p>`,
+        text: `${label.text}: ${rest.map((c) => c.text).join(' · ')}`,
+      };
     });
     return { html: out.map((l) => l.html).join(''), text: out.map((l) => l.text).join('\n') };
   }
