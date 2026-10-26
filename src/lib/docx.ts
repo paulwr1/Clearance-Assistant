@@ -186,6 +186,18 @@ function renderDataTable(tbl: Element, mode: TableMode): { html: string; text: s
   }
 
   // ---------- Text-Modus (für das Hotline-Archiv: kann keine Tabellen) ----------
+  // Buchungssätze (Zelle „an“/„per“, keine Kopfzeile) → jede Zeile als eine Zeile Text
+  const isJoin = (s: string) => /^(an|per)$/i.test(s.trim());
+  const noHeader = nonEmpty[0].some((c) => isJoin(c.text));
+  if (noHeader) {
+    const out = nonEmpty.map((r) => {
+      const cells = r.filter((c) => c.text);
+      const sep = cells.some((c) => isJoin(c.text)) ? ' ' : ' · ';
+      return { html: `<p>${cells.map((c) => c.html).join(sep)}</p>`, text: cells.map((c) => c.text).join(sep) };
+    });
+    return { html: out.map((l) => l.html).join(''), text: out.map((l) => l.text).join('\n') };
+  }
+
   const header = nonEmpty[0].map((c) => c.text);
   const body = nonEmpty.slice(1);
   const lines: { html: string; text: string }[] = [];
